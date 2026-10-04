@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+secrets/*
+!secrets/.gitkeep
+data/imports/*
+!data/imports/.gitkeep
+Testing/
+node_modules/

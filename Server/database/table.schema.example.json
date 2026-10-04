@@ -1,0 +1,17 @@
+{
+  "schema": "public",
+  "table": "episodes",
+  "columns": [
+    { "name": "id", "type": "bigint", "identity": true, "primaryKey": true },
+    { "name": "external_id", "type": "text", "notNull": true, "unique": true },
+    { "name": "title", "type": "text", "notNull": true },
+    { "name": "language", "type": "text", "notNull": true, "default": "'en'" },
+    { "name": "metadata", "type": "jsonb", "notNull": true, "default": "'{}'" },
+    { "name": "published_at", "type": "timestamptz" },
+    { "name": "created_at", "type": "timestamptz", "notNull": true, "default": "now()" }
+  ],
+  "indexes": [
+    { "columns": ["published_at"] }
+  ],
+  "rls": true
+}

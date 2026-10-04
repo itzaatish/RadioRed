@@ -1,0 +1,18 @@
+{
+  "scripts": {
+    "supabase": "supabase",
+    "db:make-table": "node scripts/create-table-migration.js",
+    "db:bulk-upload": "node scripts/bulk-upload.js",
+    "db:verify": "node scripts/verify-supabase.js",
+    "ai:radio-copy": "node scripts/generate-radio-copy.js",
+    "ai:song-intro": "node scripts/generate-song-intro.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
+    "csv-parse": "^5.6.0",
+    "dotenv": "^18.0.5"
+  },
+  "devDependencies": {
+    "supabase": "^2.119.0"
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "schema": "public",
+  "table": "sentences",
+  "columns": [
+    {
+      "name": "id",
+      "type": "bigint",
+      "identity": true,
+      "primaryKey": true
+    },
+    {
+      "name": "external_id",
+      "type": "text",
+      "notNull": true,
+      "unique": true
+    },
+    {
+      "name": "type",
+      "type": "text",
+      "notNull": true
+    },
+    {
+      "name": "song_id",
+      "type": "bigint",
+      "references": "public.songs(id)"
+    },
+    {
+      "name": "first_frame_id",
+      "type": "bigint",
+      "notNull": true,
+      "references": "public.frames(id)"
+    },
+    {
+      "name": "duration_seconds",
+      "type": "integer",
+      "notNull": true
+    },
+    {
+      "name": "transcript",
+      "type": "text"
+    },
+    {
+      "name": "tone",
+      "type": "integer"
+    },
+    {
+      "name": "metadata",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'{}'"
+    },
+    {
+      "name": "created_at",
+      "type": "timestamptz",
+      "notNull": true,
+      "default": "now()"
+    }
+  ],
+  "indexes": [
+    {
+      "columns": ["type"]
+    },
+    {
+      "columns": ["song_id"]
+    },
+    {
+      "columns": ["first_frame_id"]
+    },
+    {
+      "columns": ["tone"]
+    },
+    {
+      "columns": ["created_at"]
+    }
+  ],
+  "rls": false
+}
