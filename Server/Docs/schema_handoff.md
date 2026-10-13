@@ -1,3 +1,4 @@
+<!-- Objective: Define the durable content/audio data model and its song, sentence, and frame relationships. -->
 # Schema Handoff
 
 ## Purpose

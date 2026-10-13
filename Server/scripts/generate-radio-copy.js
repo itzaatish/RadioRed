@@ -1,11 +1,14 @@
-const { generateText } = require("../src/ai");
+// Objective: Offer a CLI entry point for generating short radio copy through the shared AI client.
+const { generateText, renderTemplate } = require("../src/ai");
+const radioAnnouncement = require("../src/prompts/radio-announcement");
 
 async function main() {
   const input = process.argv.slice(2).join(" ");
   const result = await generateText({
-    caller: __filename,
     input,
-    variables: { language: process.env.RADIO_COPY_LANGUAGE || "English" },
+    instructions: renderTemplate(radioAnnouncement.system, {
+      language: process.env.RADIO_COPY_LANGUAGE || "English",
+    }),
   });
   process.stdout.write(`${result.text}\n`);
 }

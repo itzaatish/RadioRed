@@ -1,3 +1,4 @@
+// Objective: Import approved data files into a Supabase table in bounded batches.
 const fs = require("node:fs");
 const path = require("node:path");
 

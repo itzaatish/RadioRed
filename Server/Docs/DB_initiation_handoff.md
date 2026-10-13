@@ -1,3 +1,4 @@
+<!-- Objective: Explain the server's Supabase setup, migration workflow, and bulk-import tools. -->
 # Server database toolkit
 
 ## One shared Supabase client

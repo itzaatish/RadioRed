@@ -1,3 +1,4 @@
+// Objective: Create and cache server-only Supabase clients scoped to validated database schemas.
 const { createClient } = require("@supabase/supabase-js");
 
 const { requiredEnv } = require("../config/env");

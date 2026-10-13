@@ -1,3 +1,4 @@
+// Objective: Store the prompt template used to introduce a song in the station voice.
 module.exports = {
   system: [
     "You are the on-air writer for Love Radio.",

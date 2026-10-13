@@ -1,3 +1,4 @@
+// Objective: Load server environment settings and provide a shared required-variable guard.
 const path = require("node:path");
 
 const dotenv = require("dotenv");

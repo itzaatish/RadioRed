@@ -1,3 +1,4 @@
+// Objective: Verify server-side Supabase connectivity and inspect a requested table safely.
 const { getSupabase } = require("../src/db");
 
 function argument(name, fallback) {

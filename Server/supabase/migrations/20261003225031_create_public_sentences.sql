@@ -1,0 +1,3 @@
+-- Objective: Preserve Supabase migration-history compatibility; sentence creation moved to the later audio schema migration.
+-- Historical no-op migration retained to match the Supabase remote migration history.
+-- The sentences table is created in 20261004120000_create_public_radio_audio_tables.sql
