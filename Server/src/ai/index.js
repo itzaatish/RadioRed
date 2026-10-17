@@ -1,5 +1,6 @@
 // Objective: Expose the shared AI client and prompt utilities through one stable server-side API.
 const { createChatCompletion, createResponse } = require("./azure-openai");
+const modelList = require("./modellist.json");
 
 function renderTemplate(template, variables = {}) {
   if (typeof template !== "string") {
@@ -16,7 +17,7 @@ function renderTemplate(template, variables = {}) {
 }
 
 /**
- * Generate text from any server file using the Responses API.
+ * Generate text from any server file using the NVIDIA Chat Completions API.
  *
  * const { generateText } = require("../src/ai");
  * const result = await generateText({ instructions: "You are helpful.", input: "..." });
@@ -34,4 +35,5 @@ module.exports = {
   createResponse,
   generateText,
   renderTemplate,
+  modelList,
 };

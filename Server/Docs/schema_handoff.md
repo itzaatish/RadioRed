@@ -3,18 +3,24 @@
 
 ## Purpose
 
-This document defines the currently agreed database schemas for the radio audio-generation system.
+This document describes the schema actually created by the SQL migrations in
+`supabase/migrations/`. The migrations are the source of truth if this handoff
+and the database differ. It covers both reusable content/audio data and the
+persisted radio-engine session and frame-delivery state.
 
 The goal is to give any developer working on the project a clear reference for:
 
 - What each table represents.
 - What each field means.
-- How `songs`, `sentences`, and `frames` relate to each other.
+- How `episodes`, `songs`, `sentences`, and `frames` relate to each other.
+- How `radio_sessions` and `radio_session_frames` persist playback state.
 - Which fields are required and why.
 - How sentence-level audio is represented as a linked list of smaller frame audio files.
+- What the database functions do when starting/stopping sessions and claiming frames.
 - Which design decisions are intentional and should not be changed casually.
 
-This document covers the current content/audio schema only. The radio playback queue will be designed separately.
+This is a migration-level reference. It does not claim that every relationship
+or business rule described in prose is enforced by a database constraint.
 
 ---
 
@@ -45,6 +51,15 @@ FRAME
 NULL
 ```
 
+There is also an independent `episodes` metadata table and a playback ledger:
+
+```text
+RADIO_SESSION
+  │
+  └── RADIO_SESSION_FRAME (ordered per-session frame delivery/playback record)
+          └── FRAME
+```
+
 ### Song
 
 A song is a complete playable audio track stored in Supabase Storage.
@@ -68,6 +83,10 @@ Frames form a singly linked list:
 ```text
 frame A → frame B → frame C → NULL
 ```
+
+Frames also carry generation status. The radio engine uses them as its
+claim/delivery units and records each selected frame in a session-specific
+ledger.
 
 The sentence stores only the ID of its first frame.
 
@@ -196,6 +215,9 @@ The actual audio file is stored in Supabase Storage. The database stores the pat
 }
 ```
 
+The migration creates these named indexes: `songs_tone_idx`,
+`songs_enabled_idx`, and `songs_last_played_at_idx`.
+
 ## Field significance
 
 | Field | Significance |
@@ -307,6 +329,10 @@ Frames are connected using `next_frame_id`.
   "rls": true
 }
 ```
+
+The migration creates these named indexes: `frames_next_frame_id_idx` and
+`frames_created_at_idx`. `external_id UNIQUE` also creates a PostgreSQL
+unique index.
 
 ## Field significance
 
@@ -445,6 +471,10 @@ The sentence stores the first frame and the total duration, while the frames con
   "rls": true
 }
 ```
+
+The migration creates these named indexes: `sentences_type_idx`,
+`sentences_song_id_idx`, `sentences_first_frame_id_idx`,
+`sentences_tone_idx`, and `sentences_created_at_idx`.
 
 ## Field significance
 
@@ -780,11 +810,12 @@ Do not use frames as the high-level radio queue items.
 
 A frame only represents a small piece of audio.
 
-### Rule 2 — Sentences are logical audio units
+### Rule 2 — Sentences are logical audio units; the engine ledger records frames
 
 The sentence represents the complete narration unit.
-
-The queue will eventually operate at this higher logical level.
+The sentence points to its first frame, but the radio-engine migration does
+not create a sentence-level queue table: `radio_session_frames` records frame
+delivery and playback state.
 
 ### Rule 3 — Do not store `song_id` on frames
 
@@ -852,20 +883,23 @@ Validation can be handled in application code initially.
 
 ---
 
-# 11. What Is Not Defined Yet
+# 11. What Is Not Defined by These Migrations
 
-The following are intentionally outside this schema handoff:
+The migrations provide session lifecycle state and a per-session frame
+delivery ledger, but they do not define:
 
-- Radio queue table.
-- Queue ordering implementation.
-- Queue status/lifecycle.
-- Queue concurrency/locking.
-- Producer worker implementation.
-- Consumer implementation.
-- Playback session management.
-- Audio streaming implementation.
-- Sentence generation pipeline.
-- LLM/TTS provider implementation.
+- A separate queue table, sentence-level queue entries, or a queue of songs.
+- A producer worker, consumer, audio streaming protocol, or generation pipeline.
+- Automatic frame/sentence relationship validation (for example, that every
+  linked frame belongs to exactly one sentence).
+- Validation that a sentence's stored duration equals the sum of its frames.
+- Validation that sentence types, tones, or metadata values are meaningful to
+  the application.
+- Automatic `updated_at` maintenance through triggers.
+- RLS policies or explicit database grants for the tables/RPC functions.
+
+The database functions implement the specific session and frame-claim
+operations described below; they are not a general queue implementation.
 
 These should be designed on top of the current `songs → sentences → frames` content model.
 
@@ -923,4 +957,307 @@ These should be designed on top of the current `songs → sentences → frames` 
                                                     └───────────────┘
 ```
 
-The next architectural layer can therefore treat a **sentence as one playable logical unit**, while the sentence internally resolves to its sequence of frame audio files.
+The content model treats a **sentence as one logical narration unit**. The
+radio-engine migration, however, claims and tracks individual frames and
+exposes them through `radio_session_frames`.
+
+---
+
+# 13. Migration History and Scope
+
+The migrations are applied in timestamp order:
+
+| Migration | Effect |
+|---|---|
+| `20261003214712_create_public_episodes.sql` | Creates `public.episodes`, its `published_at` index, and enables RLS. |
+| `20261003225031_create_public_sentences.sql` | Historical no-op retained for remote migration-history compatibility. It explicitly notes that `sentences` is created in the following audio-schema migration. |
+| `20261004120000_create_public_radio_audio_tables.sql` | Creates `songs`, `frames`, and `sentences`, their indexes, and enables RLS on each. |
+| `20261010100000_create_radio_engine_tables.sql` | Adds `frames.status`; creates `radio_sessions` and `radio_session_frames`; enables RLS on both; defines `stop_radio_session`, `activate_radio_session`, and `claim_radio_frame`. |
+
+The migrations use `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`,
+and `ADD COLUMN IF NOT EXISTS` for their main objects. The frame status check
+constraint is added in a `DO` block only when no constraint with the name
+`frames_status_check` is found in `pg_constraint`.
+
+All objects described below are in the `public` schema. Unless stated
+otherwise, foreign keys use PostgreSQL's default `NO ACTION` behavior; no
+`ON DELETE CASCADE` or `ON UPDATE CASCADE` is specified.
+
+---
+
+# 14. `public.episodes`
+
+`episodes` stores reusable episode metadata. None of the migrations adds a
+foreign key between this table and `songs`, `sentences`, frames, or radio
+sessions.
+
+| Column | Type | Null/default/constraint |
+|---|---|---|
+| `id` | `bigint` | Primary key; `GENERATED BY DEFAULT AS IDENTITY`. |
+| `external_id` | `text` | `NOT NULL UNIQUE`. |
+| `title` | `text` | `NOT NULL`. |
+| `language` | `text` | `NOT NULL DEFAULT 'en'`. |
+| `metadata` | `jsonb` | `NOT NULL DEFAULT '{}'`. |
+| `published_at` | `timestamptz` | Nullable. |
+| `created_at` | `timestamptz` | `NOT NULL DEFAULT now()`. |
+
+Index: `episodes_published_at_idx` on `published_at`.
+
+RLS is enabled. The migration creates no policies.
+
+---
+
+# 15. `public.frames.status`
+
+The engine migration adds this column to the `frames` table created by the
+audio-content migration:
+
+| Column | Type | Null/default/constraint |
+|---|---|---|
+| `status` | `text` | `NOT NULL DEFAULT 'READY'`; checked against `GENERATING`, `READY`, `FAILED`. |
+
+Existing rows receive the default `READY` when the column is added. The check
+constraint is named `frames_status_check`. There is no status index and no
+database rule that automatically changes a frame's status as audio generation
+progresses.
+
+---
+
+# 16. `public.radio_sessions`
+
+One row represents a radio playback session. The partial unique index permits
+at most one row with `status = 'ACTIVE'` across the entire table; this is a
+global single-active-session rule, not a per-user or per-device limit.
+
+| Column | Type | Null/default/constraint |
+|---|---|---|
+| `id` | `uuid` | Primary key; `DEFAULT gen_random_uuid()`. |
+| `tone` | `integer` | `NOT NULL`. |
+| `status` | `text` | `NOT NULL DEFAULT 'ACTIVE'`; check allows `ACTIVE`, `PAUSED`, `STOPPED`, `EXPIRED`. |
+| `session_version` | `bigint` | `NOT NULL DEFAULT 1`; must be greater than zero. |
+| `last_seen` | `timestamptz` | `NOT NULL DEFAULT now()`. |
+| `playback_started_at` | `timestamptz` | Nullable. |
+| `current_frame_id` | `bigint` | Nullable FK to `frames.id`. |
+| `stop_reason` | `text` | Nullable. |
+| `stopped_at` | `timestamptz` | Nullable. |
+| `created_at` | `timestamptz` | `NOT NULL DEFAULT now()`. |
+| `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()`. |
+
+Indexes:
+
+- `radio_sessions_one_active_idx`: unique expression index on the constant
+  `(true)`, partial predicate `status = 'ACTIVE'`. It allows only one active
+  session globally.
+- `radio_sessions_status_last_seen_idx`: composite index on `(status,
+  last_seen)`, useful for status/heartbeat-time lookups.
+
+RLS is enabled; no policy is created by the migration.
+
+`session_version` is a lifecycle generation/version value. The lifecycle
+functions increment it when changing a session between active and inactive
+states, allowing callers to reject stale frame claims using an expected
+version.
+
+---
+
+# 17. `public.radio_session_frames`
+
+This is the session-specific frame ledger. It records ordering and delivery /
+playback lifecycle for frames selected for a session. It is not a separate
+queue of sentence records.
+
+| Column | Type | Null/default/constraint |
+|---|---|---|
+| `id` | `bigint` | Primary key; `GENERATED BY DEFAULT AS IDENTITY`. |
+| `session_id` | `uuid` | `NOT NULL` FK to `radio_sessions.id`. |
+| `frame_id` | `bigint` | `NOT NULL` FK to `frames.id`. |
+| `session_version` | `bigint` | `NOT NULL`; no positivity check is declared. |
+| `sequence_number` | `integer` | `NOT NULL`; must be greater than zero. |
+| `status` | `text` | `NOT NULL`; check allows `READY`, `DELIVERED`, `PLAYING`, `PLAYED`, `FAILED`. |
+| `delivery_key` | `text` | Nullable; no default. |
+| `delivered_at` | `timestamptz` | Nullable. |
+| `playback_started_at` | `timestamptz` | Nullable. |
+| `playback_completed_at` | `timestamptz` | Nullable. |
+| `created_at` | `timestamptz` | `NOT NULL DEFAULT now()`. |
+
+Table-level uniqueness:
+
+- `(session_id, sequence_number)` — a sequence position can occur once per
+  session, across all session versions.
+- `(session_id, frame_id)` — the same frame can occur only once in a given
+  session, across all versions.
+
+Indexes:
+
+- `radio_session_frames_delivery_key_idx`: unique on
+  `(session_id, session_version, delivery_key)` where `delivery_key IS NOT
+  NULL`, making a non-null delivery key idempotent within one session version.
+- `radio_session_frames_lookup_idx`: composite
+  `(session_id, session_version, status, sequence_number)` for version/status
+  ordered lookups.
+
+RLS is enabled; no policy is created by the migration.
+
+The migration declares no check tying status to timestamp columns; for
+example, it does not require `delivered_at` when status is `DELIVERED`, or
+`playback_completed_at` when status is `PLAYED`.
+
+---
+
+# 18. Database Functions
+
+All three functions are `LANGUAGE plpgsql`. The migration does not mark them
+`SECURITY DEFINER`, set a custom `search_path`, or add explicit grants.
+
+## `stop_radio_session`
+
+```text
+public.stop_radio_session(
+  p_session_id uuid,
+  p_status text,
+  p_reason text DEFAULT NULL
+) RETURNS public.radio_sessions
+```
+
+Allowed target statuses are `PAUSED`, `STOPPED`, and `EXPIRED`; another
+non-null value raises `Invalid inactive session status`. The function updates
+the target row if it is currently `ACTIVE`, or if the target status is
+`STOPPED` and the current status is `PAUSED`. An update:
+
+- sets the requested status and `stop_reason`;
+- increments `session_version`;
+- sets `stopped_at` and `updated_at` to `now()`.
+
+If no update occurs, it returns the existing row for that ID. For a missing
+ID, the returned composite value is null. A repeated stop/expire/pause request
+does not increment the version unless it meets the update conditions.
+
+## `activate_radio_session`
+
+```text
+public.activate_radio_session(
+  p_session_id uuid,
+  p_tone integer
+) RETURNS public.radio_sessions
+```
+
+For an existing non-`ACTIVE` session, it sets `tone`, switches status to
+`ACTIVE`, increments `session_version`, refreshes `last_seen` and
+`updated_at`, and clears `playback_started_at`, `current_frame_id`,
+`stop_reason`, and `stopped_at`. If the row is already active, it returns the
+current row without changing it. A missing ID yields a null composite value.
+Activating while another session is active can fail the global unique partial
+index.
+
+## `claim_radio_frame`
+
+```text
+public.claim_radio_frame(
+  p_session_id uuid,
+  p_expected_version bigint,
+  p_deliver boolean,
+  p_delivery_key text DEFAULT NULL,
+  p_max_pending integer DEFAULT 1
+)
+RETURNS TABLE (
+  frame_id bigint,
+  external_id text,
+  audio_path text,
+  duration_seconds integer,
+  transcript text,
+  metadata jsonb,
+  sequence_number integer,
+  delivery_status text,
+  session_version bigint
+)
+```
+
+Behavior:
+
+1. Raises an exception if `p_max_pending < 1`.
+2. Locks the requested session row with `FOR UPDATE`. Returns no row unless the
+   session exists, is `ACTIVE`, and its `session_version` equals
+   `p_expected_version`.
+3. When `p_deliver` is true and a delivery key is supplied, first looks for an
+   existing ledger row with the same session, version, and key. If found, it
+   returns that frame/ledger status unchanged, making retries with that key
+   idempotent.
+4. In delivery mode, otherwise returns the earliest `DELIVERED` frame in the
+   current session version, assigning the supplied key when provided. This
+   lets a retry reuse an unacknowledged delivery. If none exists, it takes
+   the earliest `READY` ledger row, marks it `DELIVERED`, stamps
+   `delivered_at`, assigns the key, and returns it.
+5. In reservation mode (`p_deliver = false`), counts `READY` ledger entries
+   in the current session version. If the count is at least
+   `p_max_pending`, it returns the earliest already-`READY` row rather than
+   adding another reservation.
+6. To select the next frame, it examines the highest-sequence ledger frame in
+   the current session version. If that frame has a `next_frame_id`, that
+   linked frame must be `READY`; if it is not ready (or absent), the function
+   returns no row instead of skipping ahead. If there is no linked successor,
+   it selects the earliest eligible sentence's first frame.
+7. A new sentence start is selected by joining `sentences.first_frame_id` to
+   a `READY` frame, matching the session's tone, and excluding frames already
+   recorded for that session. The order is sentence `created_at`, then
+   sentence `id`, ascending. The query does not filter by `sentences.type`,
+   `songs.enabled`, or song playback state.
+8. If no eligible frame is found, returns no row. Otherwise it assigns
+   `max(sequence_number) + 1` for the session, inserts a ledger row with the
+   current version and status `DELIVERED` (and `delivered_at = now()`) in
+   delivery mode or `READY` in reservation mode, updates the session's
+   `current_frame_id` and `updated_at`, and returns frame plus ledger details.
+
+The function locks the session row to serialize claims for that session. It
+does not automatically update a ledger entry to `PLAYING`, `PLAYED`, or
+`FAILED`. It also does not update the ledger's `playback_started_at` or
+`playback_completed_at`, or the session's `last_seen` or
+`playback_started_at`. Those state changes, and acknowledgements after
+delivery, must be handled elsewhere.
+
+### Claim-function boundaries and implications
+
+- `p_max_pending` counts only ledger rows whose status is `READY` in the
+  current version. It does not count `DELIVERED`, `PLAYING`, or other states.
+- Sequence allocation uses the maximum for the session across versions, while
+  the previous-frame chain lookup is restricted to the current version.
+- The “already used” exclusion for a new sentence's first frame checks all
+  ledger versions for that session.
+- Linked successors are followed through `frames.next_frame_id`; the function
+  does not independently confirm that the successor belongs to the same
+  sentence or matches the session tone.
+- The function chooses sentence starts by `sentences.tone` and frame
+  readiness; it does not enforce the narrative `sentences.type`/`song_id`
+  conventions described earlier.
+
+---
+
+# 19. Database-Enforced Rules vs. Application Conventions
+
+The migrations enforce the following directly:
+
+- Primary keys and the declared unique keys/indexes.
+- Non-null columns and declared defaults.
+- The listed status values and positive checks for
+  `radio_sessions.session_version`, `radio_session_frames.sequence_number`,
+  and `p_max_pending` inside the claim function.
+- Declared foreign-key existence for sentence/song/frame, frame/frame,
+  session/current-frame, and session-ledger relationships.
+- At most one active radio session globally.
+- At most one ledger row per session/sequence and per session/frame.
+
+The migrations do **not** enforce:
+
+- `sentences.type` values or the expected mapping from sentence type to
+  `song_id`.
+- Non-negative song/frame/sentence durations or song play counts.
+- That a sentence's first frame and all successors form one complete,
+  acyclic chain belonging only to that sentence.
+- That frame/sentence/session tones fall within any range or agree across
+  records.
+- A specific shape for JSON metadata/tags beyond their declared `jsonb` type.
+- Timestamp/status consistency, heartbeat expiry, or automatic session
+  expiration.
+- Automatic `updated_at`, `last_seen`, frame-generation, or playback-state
+  updates except for the explicit assignments in the functions above.
+- Any row-level access policy; RLS is enabled without policies in these
+  migrations.

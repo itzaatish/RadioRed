@@ -1,40 +1,14 @@
-// Objective: Centralize authenticated Azure OpenAI Responses and Chat Completions requests.
+// Objective: Centralize authenticated NVIDIA NIM Chat Completions requests.
 const { requiredEnv } = require("../config/env");
 
-function getAzureOpenAIConfig() {
-  const rawEndpoint = requiredEnv("AZURE_OPENAI_ENDPOINT").replace(/\/+$/, "");
-  let endpoint;
+const NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
-  try {
-    endpoint = new URL(rawEndpoint);
-  } catch {
-    throw new Error("AZURE_OPENAI_ENDPOINT must be a valid HTTPS URL.");
-  }
-
-  if (endpoint.protocol !== "https:") {
-    throw new Error("AZURE_OPENAI_ENDPOINT must use HTTPS.");
-  }
-
-  // Azure OpenAI v1 is OpenAI-compatible and uses implicit API versioning.
-  if (!endpoint.pathname.endsWith("/openai/v1")) {
-    endpoint.pathname = `${endpoint.pathname.replace(/\/$/, "")}/openai/v1`;
-  }
-
+function getNvidiaConfig() {
   return {
-    endpoint: endpoint.toString().replace(/\/$/, ""),
-    apiKey: requiredEnv("AZURE_OPENAI_API_KEY"),
-    deployment: requiredEnv("AZURE_OPENAI_DEPLOYMENT"),
+    endpoint: NVIDIA_CHAT_COMPLETIONS_URL,
+    apiKey: requiredEnv("NVIDIA_API_KEY"),
+    defaultModel: requiredEnv("NVIDIA_MODEL"),
   };
-}
-
-function extractOutputText(response) {
-  if (typeof response.output_text === "string") return response.output_text;
-
-  return (response.output || [])
-    .flatMap((item) => item.content || [])
-    .filter((content) => content.type === "output_text")
-    .map((content) => content.text)
-    .join("");
 }
 
 function extractChatText(response) {
@@ -57,27 +31,6 @@ function rateLimitHeaders(headers) {
   );
 }
 
-async function post(path, payload, signal) {
-  const config = getAzureOpenAIConfig();
-  const response = await fetch(`${config.endpoint}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "api-key": config.apiKey,
-    },
-    body: JSON.stringify(payload),
-    signal,
-  });
-
-  const responseBody = await response.json().catch(() => null);
-  if (!response.ok) {
-    const message = responseBody?.error?.message || responseBody?.message || `Azure OpenAI returned HTTP ${response.status}.`;
-    throw new Error(`Azure OpenAI request failed: ${message}`);
-  }
-
-  return { body: responseBody, rateLimit: rateLimitHeaders(response.headers) };
-}
-
 function extraRequestFields(request) {
   if (request === undefined) return {};
   if (!request || typeof request !== "object" || Array.isArray(request)) {
@@ -86,12 +39,50 @@ function extraRequestFields(request) {
   return request;
 }
 
+function resolveModel({ model, extra, defaultModel }) {
+  const selectedModel = model || extra.model || defaultModel;
+  if (typeof selectedModel !== "string" || !selectedModel.trim()) {
+    throw new Error("A non-empty NVIDIA model is required.");
+  }
+  return selectedModel;
+}
+
+async function postChatCompletion(payload, signal) {
+  const config = getNvidiaConfig();
+  const response = await fetch(config.endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  const responseBody = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = responseBody?.error?.message || responseBody?.message || `NVIDIA API returned HTTP ${response.status}.`;
+    throw new Error(`NVIDIA API request failed: ${message}`);
+  }
+
+  return { body: responseBody, rateLimit: rateLimitHeaders(response.headers) };
+}
+
+function formatChatCompletion(body, rateLimit) {
+  return {
+    id: body.id,
+    model: body.model,
+    text: extractChatText(body),
+    choices: body.choices || [],
+    usage: body.usage,
+    rateLimit,
+    response: body,
+  };
+}
+
 /**
- * Call Azure OpenAI's Responses API.
- *
- * This is intentionally independent of a prompt or caller file, so any code
- * inside Server/ can use it. Pass API-specific fields such as `tools` or
- * `text` through `request` when the convenience parameters do not cover them.
+ * Generate text through NVIDIA's Chat Completions API using Responses-style
+ * convenience parameters. Every request includes the resolved model name.
  */
 async function createResponse({
   instructions,
@@ -100,8 +91,6 @@ async function createResponse({
   maxOutputTokens,
   temperature,
   topP,
-  metadata,
-  previousResponseId,
   request,
   signal,
 } = {}) {
@@ -109,37 +98,31 @@ async function createResponse({
     throw new Error("createResponse requires input.");
   }
 
-  const config = getAzureOpenAIConfig();
   const extra = extraRequestFields(request);
-  const { body, rateLimit } = await post(
-    "/responses",
+  const { defaultModel } = getNvidiaConfig();
+  const selectedModel = resolveModel({ model, extra, defaultModel });
+  const messages = [
+    ...(instructions !== undefined ? [{ role: "system", content: instructions }] : []),
+    { role: "user", content: typeof input === "string" ? input : JSON.stringify(input) },
+  ];
+  const { body, rateLimit } = await postChatCompletion(
     {
       ...extra,
-      model: model || extra.model || config.deployment,
-      ...(instructions !== undefined ? { instructions } : {}),
-      input,
-      ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
+      model: selectedModel,
+      messages,
+      ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
       ...(temperature !== undefined ? { temperature } : {}),
       ...(topP !== undefined ? { top_p: topP } : {}),
-      ...(metadata !== undefined ? { metadata } : {}),
-      ...(previousResponseId !== undefined ? { previous_response_id: previousResponseId } : {}),
     },
     signal,
   );
 
-  return {
-    id: body.id,
-    model: body.model,
-    text: extractOutputText(body),
-    usage: body.usage,
-    rateLimit,
-    response: body,
-  };
+  return formatChatCompletion(body, rateLimit);
 }
 
 /**
- * Call Azure OpenAI's OpenAI-compatible Chat Completions API. This mirrors
- * the messages-based shape used by @azure-rest/ai-inference examples.
+ * Call NVIDIA's OpenAI-compatible Chat Completions API. The model is resolved
+ * and included in each request, using the call-specific model before NVIDIA_MODEL.
  */
 async function createChatCompletion({
   messages,
@@ -155,13 +138,13 @@ async function createChatCompletion({
     throw new Error("createChatCompletion requires a non-empty messages array.");
   }
 
-  const config = getAzureOpenAIConfig();
   const extra = extraRequestFields(request);
-  const { body, rateLimit } = await post(
-    "/chat/completions",
+  const { defaultModel } = getNvidiaConfig();
+  const selectedModel = resolveModel({ model, extra, defaultModel });
+  const { body, rateLimit } = await postChatCompletion(
     {
       ...extra,
-      model: model || extra.model || config.deployment,
+      model: selectedModel,
       messages,
       ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
       ...(temperature !== undefined ? { temperature } : {}),
@@ -171,19 +154,11 @@ async function createChatCompletion({
     signal,
   );
 
-  return {
-    id: body.id,
-    model: body.model,
-    text: extractChatText(body),
-    choices: body.choices || [],
-    usage: body.usage,
-    rateLimit,
-    response: body,
-  };
+  return formatChatCompletion(body, rateLimit);
 }
 
 module.exports = {
   createResponse,
   createChatCompletion,
-  getAzureOpenAIConfig,
+  getNvidiaConfig,
 };

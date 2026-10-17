@@ -11,10 +11,14 @@ const SessionLifecycleMonitor = require("./SessionLifecycleMonitor");
 const PlayEngine = require("../engines/PlayEngine");
 const StopEngine = require("../engines/StopEngine");
 const StartEngine = require("../engines/StartEngine");
+const BroadcastRepository = require("../repositories/BroadcastRepository");
+const { BroadcastContextManager } = require("../services/BroadcastContextManager");
 
 function createRadioApplication({ config = readRadioConfig(), logger = createRadioLogger(), db = getSupabase, producer = new ProducerAdapter() } = {}) {
   const sessionRepository = new SessionRepository({ db });
   const frameRepository = new FrameRepository({ db });              
+  const broadcastRepository = new BroadcastRepository({ db });
+  const broadcastContextManager = new BroadcastContextManager({ repository: broadcastRepository });
   const audioUrlService = new AudioUrlService({ db, config });      // This just make audio url at time of need
   let playEngine;
   const scheduler = new FrameScheduler({
@@ -34,7 +38,21 @@ function createRadioApplication({ config = readRadioConfig(), logger = createRad
     logger,
   });
 
-  return { config, logger, sessionRepository, frameRepository, audioUrlService, producer, scheduler, lifecycleMonitor, startEngine, stopEngine, playEngine };
+  return {
+    config,
+    logger,
+    sessionRepository,
+    frameRepository,
+    broadcastRepository,
+    broadcastContextManager,
+    audioUrlService,
+    producer,
+    scheduler,
+    lifecycleMonitor,
+    startEngine,
+    stopEngine,
+    playEngine,
+  };
 }
 
 module.exports = { createRadioApplication };
